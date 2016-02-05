@@ -1,15 +1,16 @@
 #
 # Copyright (C) 2015 OpenWrt-dist
+# Copyright (C) 2015 Jian Chang <aa65535@live.com>
 #
-# This is free software, licensed under the GPLv3.
-# See /COPYING for more information.
+# This is free software, licensed under the GNU General Public License v3.
+# See /LICENSE for more information.
 #
 
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=ChinaDNS
 PKG_VERSION:=1.3.2
-PKG_RELEASE:=1
+PKG_RELEASE:=3
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://github.com/aa65535/openwrt-chinadns/releases/download/v$(PKG_VERSION)
