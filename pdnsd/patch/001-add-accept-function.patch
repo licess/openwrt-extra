@@ -1,0 +1,498 @@
+diff -r -u -N -w a/src/conf-keywords.h b/src/conf-keywords.h
+--- a/src/conf-keywords.h	2012-04-26 17:41:04.000000000 +0800
++++ b/src/conf-keywords.h	2015-02-09 21:31:48.373868000 +0800
+@@ -93,6 +93,9 @@
+ 	REJECTLIST,
+ 	REJECTPOLICY,
+ 	REJECTRECURSIVELY,
++	ACCEPTLIST,
++	ACCEPTPOLICY,
++	ACCEPTRECURSIVELY,
+ 	LABEL,
+ 
+ 	A,
+@@ -168,6 +171,9 @@
+ 
+ /* Table for looking up server options. Order alphabetically! */
+ static const namevalue_t server_options[]= {
++	{"accept",             ACCEPTLIST},
++	{"accept_policy",      ACCEPTPOLICY},
++	{"accept_recursively", ACCEPTRECURSIVELY},
+ 	{"caching",            CACHING},
+ 	{"device",             DEVICE},
+ 	{"edns_query",         EDNS_QUERY},
+diff -r -u -N -w a/src/conf-parser.c b/src/conf-parser.c
+--- a/src/conf-parser.c	2012-04-26 17:41:04.000000000 +0800
++++ b/src/conf-parser.c	2015-02-09 21:33:02.947110200 +0800
+@@ -292,6 +292,7 @@
+ #define addr_add_(ata,ipstr,len) addr_add(ata,ipstr)
+ static const char *reject_add(servparm_t *serv, const char *ipstr);
+ #define reject_add_(serv,ipstr,len) reject_add(serv,ipstr)
++static int parse_route(servparm_t *serv, char *route_file);
+ static void check_localaddrs(servparm_t *serv);
+ static int read_resolv_conf(const char *fn, atup_array *ata, char **errstr);
+ static const char *slist_add(slist_array *sla, const char *nm, unsigned int len, int tp);
+@@ -1172,6 +1173,26 @@
+ 	    ASSIGN_ON_OFF(server.rejectrecursively,p,C_ON,"bad qualifier in reject_recursively= option.");
+ 	    break;
+ 
++		case ACCEPTLIST:
++			SCAN_STRING(p,strbuf,len);
++			STRNDUP(server.route_file,strbuf,len);
++			if(parse_route(&server, server.route_file)!=0) {
++				REPORT_ERROR("error: parse_route");
++				PARSERROR;
++			}
++			break;
++
++		case ACCEPTPOLICY: {
++			int cnst;
++			ASSIGN_CONST(cnst,p,cnst==C_FAIL || cnst==C_NEGATE,"bad qualifier in accept_policy= option.");
++			server.acceptpolicy=cnst;
++		}
++			break;
++
++		case ACCEPTRECURSIVELY:
++			ASSIGN_ON_OFF(server.acceptrecursively,p,C_ON,"bad qualifier in accept_recursively= option.");
++			break;
++
+ 	  case LABEL:
+ 	    SCAN_STRING(p,strbuf,len);
+ 	    STRNDUP(server.label,strbuf,len);
+@@ -1972,6 +1993,70 @@
+   return "bad IP address";
+ }
+ 
++static int cmp_net_mask(const void *a, const void *b) {
++	net_mask_t *neta = (net_mask_t *)a;
++	net_mask_t *netb = (net_mask_t *)b;
++	if (neta->net.s_addr == netb->net.s_addr)
++		return 0;
++	// TODO: pre ntohl
++	if (ntohl(neta->net.s_addr) > ntohl(netb->net.s_addr))
++		return 1;
++	return -1;
++}
++
++static int parse_route(servparm_t *serv, char *route_file) {
++	FILE *fp;
++	char line_buf[32];
++	char *line;
++	size_t len = sizeof(line_buf);
++	ssize_t read;
++	char net[32];
++	net_list_t *rl = calloc(1, sizeof(net_list_t));
++	rl->entries = 0;
++	int i = 0;
++
++	fp = fopen(route_file, "rb");
++	if (fp == NULL) {
++		fprintf(stderr,"Error: Can't open route: %s\n", route_file);
++		return -1;
++	}
++	while ((line = fgets(line_buf, len, fp))) {
++		rl->entries++;
++	}
++
++	rl->nets = calloc(rl->entries, sizeof(net_mask_t));
++	if (0 != fseek(fp, 0, SEEK_SET)) {
++		fprintf(stderr,"Error: fseek");
++		return -1;
++	}
++	while ((line = fgets(line_buf, len, fp))) {
++		char *sp_pos;
++		sp_pos = strchr(line, '\r');
++		if (sp_pos) *sp_pos = 0;
++		sp_pos = strchr(line, '\n');
++		if (sp_pos) *sp_pos = 0;
++		sp_pos = strchr(line, '/');
++		if (sp_pos) {
++			*sp_pos = 0;
++			rl->nets[i].mask = (1 << (32 - atoi(sp_pos + 1))) - 1;
++		} else {
++			rl->nets[i].mask = UINT32_MAX;
++		}
++		if (0 == inet_aton(line, &rl->nets[i].net)) {
++			fprintf(stderr,"Error: invalid addr %s in %s:%d\n", line, route_file, i + 1);
++			return -1;
++		}
++		i++;
++	}
++	qsort(rl->nets, rl->entries, sizeof(net_mask_t),
++				cmp_net_mask);
++
++	serv->route_list = rl;
++
++	fclose(fp);
++	return 0;
++}
++
+ /* Try to avoid the possibility that pdnsd will query itself. */
+ static void check_localaddrs(servparm_t *serv)
+ {
+diff -r -u -N -w a/src/conff.c b/src/conff.c
+--- a/src/conff.c	2012-04-26 17:41:04.000000000 +0800
++++ b/src/conff.c	2015-02-09 21:32:36.184414900 +0800
+@@ -101,6 +101,10 @@
+   preset:            1,
+   rejectrecursively: 0,
+   rejectpolicy:      C_FAIL,
++  route_file:        NULL,
++  acceptrecursively: 0,
++  acceptpolicy:      C_FAIL,
++  route_list:        0,
+   policy:            C_INCLUDED,
+   alist:             NULL,
+   atup_a:            NULL,
+@@ -382,6 +386,7 @@
+ 	da_free(serv->atup_a);
+ 	free_slist_array(serv->alist);
+ 	da_free(serv->reject_a4);
++	da_free(serv->route_file);
+ #if ALLOW_LOCAL_AAAA
+ 	da_free(serv->reject_a6);
+ #endif
+diff -r -u -N -w a/src/conff.h b/src/conff.h
+--- a/src/conff.h	2012-04-26 17:41:04.000000000 +0800
++++ b/src/conff.h	2015-02-09 21:32:48.721524300 +0800
+@@ -36,6 +36,19 @@
+ #include "ipvers.h"
+ #include "list.h"
+ 
++typedef struct {
++  struct in_addr net;
++  in_addr_t mask;
++} net_mask_t;
++
++typedef struct {
++  int entries;
++  net_mask_t *nets;
++} net_list_t;
++
++static int cmp_net_mask(const void *a, const void *b);
++static int test_ip_in_list(struct in_addr ip, const net_list_t *netlist);
++
+ /* From main.c */
+ #if DEBUG>0
+ extern short int debug_p;
+@@ -103,6 +116,10 @@
+ 	char             preset;
+ 	char             rejectrecursively;
+ 	short            rejectpolicy;
++	char            *route_file;
++	char             acceptrecursively;
++	short            acceptpolicy;
++	net_list_t      *route_list;
+ 	short            policy;
+ 	slist_array      alist;
+ 	atup_array       atup_a;
+diff -r -u -N -w a/src/dns_query.c b/src/dns_query.c
+--- a/src/dns_query.c	2012-04-26 17:41:04.000000000 +0800
++++ b/src/dns_query.c	2015-02-09 21:32:09.511563300 +0800
+@@ -71,6 +71,13 @@
+ #endif
+ } rejectlist_t;
+ 
++typedef struct acceptlist_s {
++	struct acceptlist_s *next;
++	short               policy;
++	short               inherit;
++	net_list_t          *net_list;
++} acceptlist_t;
++
+ /* --- structures and state constants for parallel query */
+ typedef struct {
+ 	union {
+@@ -100,6 +107,7 @@
+ 	char                failed;
+ 	const unsigned char *nsdomain;
+ 	rejectlist_t        *rejectlist;
++	acceptlist_t        *acceptlist;
+ 	/* internal state for p_exec_query */
+ 	int                 sock;
+ #if 0
+@@ -133,6 +141,11 @@
+ #define rejectlist_a4(st)   ((addr4maskpair_t *)(st)->rejectlist->rdata)
+ #endif
+ 
++#define have_acceptlist(st) ((st)->acceptlist!=NULL)
++#define inherit_acceptlist(st) ((st)->acceptlist && (st)->acceptlist->inherit)
++#define accept_policy(st)   ((st)->acceptlist->policy)
++#define net_list(st)      ((st)->acceptlist->net_list)
++
+ #define QS_INITIAL       0  /* This is the initial state. Set this before starting. */
+ 
+ #define QS_TCPINITIAL    1  /* Start a TCP query. */
+@@ -175,6 +188,47 @@
+ typedef DYNAMIC_ARRAY(dns_cent_t) *dns_cent_array;
+ 
+ 
++static int cmp_net_mask(const void *a, const void *b) {
++  net_mask_t *neta = (net_mask_t *)a;
++  net_mask_t *netb = (net_mask_t *)b;
++  if (neta->net.s_addr == netb->net.s_addr)
++	return 0;
++  // TODO: pre ntohl
++  if (ntohl(neta->net.s_addr) > ntohl(netb->net.s_addr))
++	return 1;
++  return -1;
++}
++
++static int test_ip_in_list(struct in_addr ip, const net_list_t *netlist) {
++  // binary search
++  int l = 0, r = netlist->entries - 1;
++  int m, cmp;
++  if (netlist->entries == 0)
++	return 0;
++  net_mask_t ip_net;
++  ip_net.net = ip;
++  while (l != r) {
++	m = (l + r) / 2;
++	cmp = cmp_net_mask(&ip_net, &netlist->nets[m]);
++	if (cmp == -1) {
++	  if (r != m)
++		r = m;
++	  else
++		break;
++	} else {
++	  if (l != m)
++		l = m;
++	  else
++		break;
++	}
++  }
++  if ((ntohl(netlist->nets[l].net.s_addr) ^ ntohl(ip.s_addr)) &
++	  (UINT32_MAX ^ netlist->nets[l].mask)) {
++	return 0;
++  }
++  return 1;
++}
++
+ /*
+  * Take the data from an RR and add it to an array of cache entries.
+  * The return value will be RC_OK in case of success,
+@@ -1365,7 +1419,7 @@
+ #		define ans_sec  secs[0]
+ #		define auth_sec secs[1]
+ #		define add_sec  secs[2]
+-		unsigned short qtype,flags,aa,neg_ans=0,reject_ans=0,num_ns=0;
++		unsigned short qtype,flags,aa,neg_ans=0,reject_ans=0,accept_ans=1,num_ns=0;
+ 		int numoptrr;
+ 		edns_info_t ednsinfo= {0};
+ 
+@@ -1611,6 +1665,50 @@
+ 		rejectlist_scan_done:;
+ 		}
+ 
++		if(have_acceptlist(st)) {
++			int i;
++			net_list_t *net_list=net_list(st);
++			/* Check addresses in the answer, authority and additional sections. */
++			for(i=0;i<3;++i) {
++				dns_cent_array sec=secs[i];
++				int j,nce=DA_NEL(sec);
++				for(j=0;j<nce;++j) {
++					dns_cent_t *cent=&DA_INDEX(sec,j);
++					rr_set_t *rrset=getrrset_A(cent);
++					if(rrset) {
++						rr_bucket_t *rr;
++						accept_ans=0;
++						for(rr=rrset->rrs; rr; rr=rr->next) {
++							if (test_ip_in_list(*(struct in_addr *)(rr->data), net_list) == 1) {
++								struct in_addr *a=(struct in_addr *)(rr->data);
++								unsigned char nmbuf[DNSNAMEBUFSIZE]; char abuf[ADDRSTR_MAXLEN];
++#if DEBUG>0
++								DEBUG_PDNSDA_MSG("A record \"%s\" for \"%s\" from server \"%s\""
++										 " included in the acceptlist.\n",
++										 inet_ntop(AF_INET,a,abuf,sizeof(abuf)),
++										 rhn2str(cent->qname,nmbuf,sizeof(nmbuf)),
++										 PDNSDA2STR(PDNSD_A(st)));
++#endif
++								accept_ans=1;
++							} else {
++								struct in_addr *a=(struct in_addr *)(rr->data);
++								unsigned char nmbuf[DNSNAMEBUFSIZE]; char abuf[ADDRSTR_MAXLEN];
++#if DEBUG>0
++								DEBUG_PDNSDA_MSG("A record \"%s\" for \"%s\" from server \"%s\""
++										 " not included in the acceptlist.\n",
++										 inet_ntop(AF_INET,a,abuf,sizeof(abuf)),
++										 rhn2str(cent->qname,nmbuf,sizeof(nmbuf)),
++										 PDNSDA2STR(PDNSD_A(st)));
++#endif
++							}
++						}
++					}
++				}
++			}
++			goto acceptlist_scan_done;
++		acceptlist_scan_done:;
++		}
++
+ 		/* negative caching for domains */
+ 		if (rcode==RC_NAMEERR) {
+ 			DEBUG_PDNSDA_MSG("Server %s returned error code: %s\n", PDNSDA2STR(PDNSD_A(st)),get_ename(rcode));
+@@ -1660,6 +1758,15 @@
+ 			}
+ 		}
+ 
++		if(!accept_ans) {
++			if(accept_policy(st)==C_NEGATE && st->failed<=1)
++				goto name_error;
++			else {
++				rv=RC_SERVFAIL;
++				goto free_ent_centarrays_recvbuf_return;
++			}
++		}
++
+ 		if(global.deleg_only_zones && st->auth_serv<3) { /* st->auth_serv==3 means this server is a root-server. */
+ 			int missingdelegation,authcnt;
+ 			/* The deleg_only_zones data may change due to runtime reconfiguration,
+@@ -1849,7 +1956,7 @@
+ 		**entp=DA_INDEX(ans_sec,0);
+ 		rv=RC_OK;
+ 	add_additional:
+-		if (!st->failed && !reject_ans) {
++		if (!st->failed && !reject_ans && accept_ans) {
+ 			/* Add the additional RRs to the cache. */
+ 			/* dns_cent_array secs[3]={ans_sec,auth_sec,add_sec}; */
+ 			int i;
+@@ -1959,7 +2066,7 @@
+  */
+ static int add_qserv(query_stat_array *q, pdnsd_a2 *a, int port, time_t timeout, unsigned flags,
+ 		     char nocache, char lean_query, char edns_query, char auth_s, char needs_testing, char trusted,
+-		     const unsigned char *nsdomain, rejectlist_t *rejectlist)
++			 const unsigned char *nsdomain, rejectlist_t *rejectlist, acceptlist_t *acceptlist)
+ {
+ 	query_stat_t *qs;
+ 
+@@ -2004,6 +2111,7 @@
+ 	qs->failed=0;
+ 	qs->nsdomain=nsdomain; /* Note: only a reference is copied, not the name itself! */
+ 	qs->rejectlist=rejectlist;
++	qs->acceptlist=acceptlist;
+ 
+ 	qs->state=QS_INITIAL;
+ 	qs->qm=global.query_method;
+@@ -2855,7 +2963,8 @@
+ 				 * in CFF_NOINHERIT). */
+ 				if (!add_qserv(serv, pserva, 53, qse->timeout, qse->flags&~CFF_NOINHERIT, 0,
+ 					       qse->lean_query,qse->edns_query,2,0,!global.paranoid,nsdomain,
+-					       inherit_rejectlist(qse)?qse->rejectlist:NULL))
++						   inherit_rejectlist(qse)?qse->rejectlist:NULL,
++						   inherit_acceptlist(qse)?qse->acceptlist:NULL))
+ 				{
+ 					return -1;
+ 				}
+@@ -2967,6 +3076,36 @@
+ 	}
+ }
+ 
++
++#define serv_has_acceptlist(s) ((s)->route_file!=NULL)
++
++static acceptlist_t *add_acceptlist(acceptlist_t *al, servparm_t *sp)
++{
++	acceptlist_t *alist = malloc(sizeof(acceptlist_t) + sizeof(net_list_t));
++
++	if(alist) {
++		alist->policy = sp->acceptpolicy;
++		alist->inherit = sp->acceptrecursively;
++		alist->net_list = sp->route_list;
++		alist->next = al;
++	}
++	else {
++		DEBUG_MSG("Out of memory in add_acceptlist()\n");
++	}
++
++	return alist;
++}
++
++inline static void free_acceptlist(acceptlist_t *al)
++{
++	while(al) {
++		acceptlist_t *next = al->next;
++		free(al);
++		al=next;
++	}
++}
++
++
+ /* Lookup addresses of nameservers provided by root servers for a given domain in the cache.
+    Returns NULL if unsuccessful (or the cache entries have timed out).
+ */
+@@ -3197,6 +3336,7 @@
+ 	int one_up=0,seenrootserv=0;
+ 	query_stat_array serv=NULL;
+ 	rejectlist_t *rejectlist=NULL;
++	acceptlist_t *acceptlist=NULL;
+ 
+ 	/* try the servers in the order of their definition */
+ 	lock_server_data();
+@@ -3207,6 +3347,7 @@
+ 			int m=DA_NEL(sp->atup_a);
+ 			if(m>0) {
+ 				rejectlist_t *rjl=NULL;
++				acceptlist_t *acl=NULL;
+ 				int j=0, jstart=0;
+ 				if(sp->rand_servers) j=jstart=random()%m;
+ 				do {
+@@ -3247,11 +3388,16 @@
+ 										if(!rjl) {one_up=0; da_free(adrs); goto done;}
+ 										rejectlist=rjl;
+ 									}
++									if(serv_has_acceptlist(sp) && sp->acceptrecursively && !acl) {
++										acl=add_acceptlist(acceptlist,sp);
++										if(!acl) {one_up=0; da_free(adrs); goto done;}
++										acceptlist=acl;
++									}
+ 									do {
+ 										one_up=add_qserv(&serv, &DA_INDEX(adrs,k), 53, sp->timeout,
+ 												 mk_flag_val(sp)&~CFF_NOINHERIT, sp->nocache,
+ 												 sp->lean_query, sp->edns_query, 2, 0,
+-												 !global.paranoid, topdomain, rjl);
++												 !global.paranoid, topdomain, rjl, acl);
+ 										if(!one_up) {
+ 											da_free(adrs);
+ 											goto done;
+@@ -3273,10 +3419,15 @@
+ 							if(!rjl) {one_up=0; goto done;}
+ 							rejectlist=rjl;
+ 						}
++						if(serv_has_acceptlist(sp) && !acl) {
++							acl=add_acceptlist(acceptlist,sp);
++							if(!acl) {one_up=0; goto done;}
++							acceptlist=acl;
++						}
+ 						one_up=add_qserv(&serv, &at->a, sp->port, sp->timeout,
+ 								 mk_flag_val(sp), sp->nocache, sp->lean_query, sp->edns_query,
+ 								 sp->rootserver?3:(!sp->is_proxy),
+-								 needs_testing(sp), 1, NULL, rjl);
++								 needs_testing(sp), 1, NULL, rjl, acl);
+ 						if(!one_up)
+ 							goto done;
+ 					}
+@@ -3318,6 +3469,7 @@
+ 	}
+ 	del_qserv(serv);
+ 	free_rejectlist(rejectlist);
++	free_acceptlist(acceptlist);
+ 	return rc;
+ }
+ 
+@@ -3607,7 +3759,7 @@
+ 		qserv=NULL;
+ 		m=DA_NEL(atup_a);
+ 		for(j=0; j<m; ++j) {
+-			if(!add_qserv(&qserv, &DA_INDEX(atup_a,j).a, port, timeout, 0, 0, 1, edns_query, 0, 0, 1, NULL, NULL)) {
++			if(!add_qserv(&qserv, &DA_INDEX(atup_a,j).a, port, timeout, 0, 0, 1, edns_query, 0, 0, 1, NULL, NULL, NULL)) {
+ 				/* Note: qserv array already cleaned up by add_qserv() */
+ 				return RC_SERVFAIL;
+ 			}
+@@ -3686,6 +3838,7 @@
+ 	qs.failed=0;
+ 	qs.nsdomain=NULL;
+ 	qs.rejectlist=NULL;
++	qs.acceptlist=NULL;
+ 
+  try_again:
+ 	qs.state=QS_INITIAL;
