@@ -1,5 +1,6 @@
 #
 # Copyright (C) 2015 OpenWrt-dist
+# Copyright (C) 2015 Jian Chang <aa65535@live.com>
 #
 # This is free software, licensed under the GNU General Public License v3.
 # See /LICENSE for more information.
@@ -8,12 +9,12 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=shadowsocks-libev
-PKG_VERSION:=2.4.0
+PKG_VERSION:=2.4.4
 PKG_RELEASE:=1
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://github.com/shadowsocks/openwrt-shadowsocks/releases/download/v$(PKG_VERSION)
-PKG_MD5SUM:=4f68731a8ca5db21b3eb994e8c2f1a7a
+PKG_MD5SUM:=6fc091491d26b353ddd1e7faba8d032f
 
 PKG_LICENSE:=GPLv3
 PKG_LICENSE_FILES:=LICENSE
@@ -68,7 +69,7 @@ if [ -z "$${IPKG_INSTROOT}" ]; then
 		delete firewall.shadowsocks
 		set firewall.shadowsocks=include
 		set firewall.shadowsocks.type=script
-		set firewall.shadowsocks.path=/usr/share/shadowsocks/firewall.include
+		set firewall.shadowsocks.path=/var/etc/shadowsocks.include
 		set firewall.shadowsocks.reload=1
 		commit firewall
 EOF
@@ -98,8 +99,6 @@ define Package/shadowsocks-libev-spec/install
 	$(INSTALL_DATA) ./files/shadowsocks.config $(1)/etc/config/shadowsocks
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/shadowsocks.spec $(1)/etc/init.d/shadowsocks
-	$(INSTALL_DIR) $(1)/usr/share/shadowsocks
-	$(INSTALL_DATA) ./files/shadowsocks.include $(1)/usr/share/shadowsocks/firewall.include
 endef
 
 Package/shadowsocks-libev-polarssl/install = $(Package/shadowsocks-libev/install)
