@@ -9,6 +9,6 @@ include $(TOPDIR)/rules.mk
 LUCI_TITLE:=LuCI Support for NWAN
 LUCI_DEPENDS:=+pdnsd
 
-include ../../luci.mk
+include ../../luci/luci.mk
 
 # call BuildPackage - OpenWrt buildroot signature
