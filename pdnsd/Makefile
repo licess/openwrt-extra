@@ -52,4 +52,13 @@ define Package/pdnsd/install
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/doc/pdnsd.conf $(1)/etc/
 endef
 
+define Package/pdnsd/postinst
+#!/bin/sh
+if [ -z "$${IPKG_INSTROOT}" ]; then
+	chmod +x /etc/init.d/pdnsd
+	/etc/init.d/pdnsd enable
+fi
+exit 0
+endef
+
 $(eval $(call BuildPackage,pdnsd))
