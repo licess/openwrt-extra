@@ -50,6 +50,8 @@ define Package/pdnsd/install
 	$(INSTALL_BIN) ./files/pdnsd.init $(1)/etc/init.d/pdnsd
 	$(INSTALL_DIR) $(1)/etc
 	$(INSTALL_CONF) $(PKG_BUILD_DIR)/doc/pdnsd.conf $(1)/etc/
+	$(INSTALL_DIR) $(1)/lib/upgrade/keep.d
+	$(INSTALL_DATA) ./files/pdnsd.upgrade $(1)/lib/upgrade/keep.d/pdnsd
 endef
 
 define Package/pdnsd/postinst
